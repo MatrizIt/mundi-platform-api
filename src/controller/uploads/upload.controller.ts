@@ -5,10 +5,11 @@ import {
     Get,
     Param,
     Post,
+    UploadedFile,
     UploadedFiles,
     UseInterceptors
 } from "@nestjs/common"
-import { FileFieldsInterceptor } from "@nestjs/platform-express"
+import { FileFieldsInterceptor, FileInterceptor } from "@nestjs/platform-express"
 import { ImagesService } from "./upload.service"
 import * as fs from 'fs';
 import * as path from 'path';
@@ -54,5 +55,27 @@ async getImagesByEntrepreneurId(
     async deleteImage(@Param("id") id: number) {
         await this.imagesService.deleteImage(id)
         return { success: true, message: "Imagem deletada com sucesso." }
+    }
+
+    @Post("profile/upload")
+    @UseInterceptors(FileInterceptor('image'))
+    async updateProfileImage(
+        @UploadedFile() image: Express.Multer.File,
+        @Body() body: { entrepreneurId: number }
+    ) {
+        const entrepreneurId = body.entrepreneurId
+        const imagePath = await this.imagesService.uploadProfileImage(image, entrepreneurId);
+
+        return { success: true, imagePath }
+    }
+
+    @Delete("profile")
+    async deleteProfileImage(
+        @Body() body: { entrepreneurId: number }
+    ) {
+        const entrepreneurId = body.entrepreneurId
+        await this.imagesService.deleteProfileImage(entrepreneurId);
+
+        return { success: true }
     }
 }
