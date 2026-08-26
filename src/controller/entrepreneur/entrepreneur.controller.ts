@@ -23,7 +23,7 @@ import {
 import { Headers } from "@nestjs/common"
 import * as jwt from "jsonwebtoken"
 import { EntrepreneurService, NearbyResult } from "./entrepreneur.service"
-import { parseCoordinatePair } from "../helpers/geo"
+import { parseCoordinatePair, parseOptionwork } from "../helpers/geo"
 import { CreateEntrepreneurDto } from "./dto/create-entrepreneur.dto"
 import { UpdateOperationsDto } from "./dto/update-operations.dto"
 import { Entrepreneur } from "./entities/entrepreneur.entity"
@@ -91,6 +91,7 @@ export class EntrepreneurController {
         @Query("section") section?: string,
         @Query("lat") lat?: string,
         @Query("lng") lng?: string,
+        @Query("optionwork") optionwork?: string,
         @Headers("authorization") authorizationHeader?: string
     ): Promise<NearbyResult> {
         const position = parseCoordinatePair(lat, lng)
@@ -102,7 +103,8 @@ export class EntrepreneurController {
             latitude: position?.latitude,
             longitude: position?.longitude,
             userId: caller?.id,
-            role: caller?.role
+            role: caller?.role,
+            optionwork: parseOptionwork(optionwork)
         })
     }
 

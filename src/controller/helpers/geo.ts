@@ -58,6 +58,12 @@ export function parseCoordinatePair(
     return { latitude, longitude }
 }
 
+export function parseOptionwork(raw?: string): boolean | undefined {
+    if (raw === "true") return true
+    if (raw === "false") return false
+    return undefined
+}
+
 export function hasUsableCoordinates(
     latitude?: number | null,
     longitude?: number | null
