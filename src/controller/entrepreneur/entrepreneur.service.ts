@@ -156,6 +156,25 @@ export class EntrepreneurService {
         return entrepreneurUf === clientUf
     }
 
+    /**
+     * Empreendedor sem nenhum dia ativo em `operation` não abre em dia nenhum da semana —
+     * usado para permitir contas de teste (ex.: revisão da Apple) sem expediente configurado
+     * e que por isso nunca devem aparecer nas buscas do cliente. `operation` ausente/malformado
+     * é tratado como visível (`true`), para não esconder por engano dado legado que não bata
+     * com o formato esperado.
+     */
+    private hasAnyActiveWorkday(entrepreneur: Entrepreneur): boolean {
+        try {
+            const ops: any[] = Array.isArray(entrepreneur.operation)
+                ? (entrepreneur.operation as any[])
+                : JSON.parse(entrepreneur.operation as unknown as string)
+            if (!Array.isArray(ops)) return true
+            return ops.some((op) => op?.isActive === true)
+        } catch {
+            return true
+        }
+    }
+
     private async resolveClientUf(
         userId?: number,
         role?: string
@@ -221,7 +240,11 @@ export class EntrepreneurService {
             }
         })
 
-        if (!section) return entrepreneurs
+        const visibleEntrepreneurs = entrepreneurs.filter((e) =>
+            this.hasAnyActiveWorkday(e)
+        )
+
+        if (!section) return visibleEntrepreneurs
 
         const avgRating = (e: Entrepreneur): number =>
             e.avaliation?.length
@@ -229,7 +252,7 @@ export class EntrepreneurService {
                 : 0
 
         if (section === 'recommended') {
-            return [...entrepreneurs].sort((a, b) => {
+            return [...visibleEntrepreneurs].sort((a, b) => {
                 const diff = avgRating(b) - avgRating(a)
                 if (diff !== 0) return diff
                 return (b.avaliation?.length ?? 0) - (a.avaliation?.length ?? 0)
@@ -241,7 +264,7 @@ export class EntrepreneurService {
             const todayName = weekdays[new Date().getDay()]
             const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes()
 
-            return entrepreneurs.filter(e => {
+            return visibleEntrepreneurs.filter(e => {
                 try {
                     const ops: any[] = Array.isArray(e.operation)
                         ? e.operation as any[]
@@ -259,10 +282,10 @@ export class EntrepreneurService {
 
         if (section === 'offers') {
             // Top-10 by rating as featured/promoted picks
-            return [...entrepreneurs].sort((a, b) => avgRating(b) - avgRating(a)).slice(0, 10)
+            return [...visibleEntrepreneurs].sort((a, b) => avgRating(b) - avgRating(a)).slice(0, 10)
         }
 
-        return entrepreneurs
+        return visibleEntrepreneurs
     }
 
     async register(data: CreateEntrepreneurDto): Promise<ResultDto> {
