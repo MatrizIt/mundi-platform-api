@@ -16,6 +16,30 @@ import { DateTime } from "luxon"
 import { Avaliation } from "../avaliation/entities/avaliation.entity"
 import { NotificationsService } from "../notifications/notifications.service"
 
+/** Pausa recorrente dentro do expediente de um dia, ex.: almoço. `start`/`end` em `HH:mm`. */
+interface OperationBreak {
+    start: string
+    end: string
+    label?: string
+}
+
+/** Item do dia dentro do JSON `operation` do empreendedor. Ausência de `breaks` equivale a lista vazia. */
+interface OperationDay {
+    day: string
+    isActive: boolean
+    openinHours: string
+    closingTime: string
+    breaks?: OperationBreak[]
+}
+
+/** Pausa avulsa, válida só numa data específica. `date` em `YYYY-MM-DD`, `start`/`end` em `HH:mm`. */
+interface BreakException {
+    date: string
+    start: string
+    end: string
+    label?: string
+}
+
 @Injectable()
 export class SchedulingService {
     private readonly logger = new Logger(SchedulingService.name)
@@ -522,7 +546,7 @@ export class SchedulingService {
             )
         }
 
-        const operationHours = Array.isArray(entrepreneur.operation)
+        const operationHours: OperationDay[] = Array.isArray(entrepreneur.operation)
             ? entrepreneur.operation
             : JSON.parse(entrepreneur.operation as unknown as string)
 
@@ -531,7 +555,7 @@ export class SchedulingService {
             .trim()
             .toLowerCase()
 
-        const todayOperation = operationHours.find((op: any) => {
+        const todayOperation = operationHours.find((op: OperationDay) => {
             return op.day.trim().toLowerCase() === dayOfWeek && op.isActive
         })
 
@@ -552,6 +576,46 @@ export class SchedulingService {
         }
         const opening = parseTime(todayOperation.openinHours)
         const closing = parseTime(todayOperation.closingTime)
+
+        // Pausas do dia entram como mais intervalos ocupados: a regra de colisão
+        // do laço abaixo já resolve o resto sem precisar mudar.
+        for (const brk of todayOperation.breaks ?? []) {
+            const brkStart = parseTime(brk.start)
+            const brkEnd = parseTime(brk.end)
+            const start = dateObj
+                .set({ hour: brkStart.hour, minute: brkStart.minute, second: 0, millisecond: 0 })
+                .toUTC()
+                .toMillis()
+            const end = dateObj
+                .set({ hour: brkEnd.hour, minute: brkEnd.minute, second: 0, millisecond: 0 })
+                .toUTC()
+                .toMillis()
+            occupiedIntervals.push({ start, end })
+        }
+
+        // Pausas avulsas: mesma ideia, mas só entram se a data bater exatamente.
+        const breakExceptions: BreakException[] = entrepreneur.breakExceptions == null
+            ? []
+            : Array.isArray(entrepreneur.breakExceptions)
+                ? entrepreneur.breakExceptions
+                : JSON.parse(entrepreneur.breakExceptions as unknown as string)
+
+        const requestedDate = dateObj.toISODate()
+        for (const exception of breakExceptions) {
+            if (exception.date !== requestedDate) continue
+
+            const excStart = parseTime(exception.start)
+            const excEnd = parseTime(exception.end)
+            const start = dateObj
+                .set({ hour: excStart.hour, minute: excStart.minute, second: 0, millisecond: 0 })
+                .toUTC()
+                .toMillis()
+            const end = dateObj
+                .set({ hour: excEnd.hour, minute: excEnd.minute, second: 0, millisecond: 0 })
+                .toUTC()
+                .toMillis()
+            occupiedIntervals.push({ start, end })
+        }
 
         const closingDateTime = dateObj.set({
             hour: closing.hour,

@@ -70,6 +70,9 @@ export class Entrepreneur {
     @Column({ type: "json" })
     operation: JSON
 
+    @Column({ type: "json", nullable: true })
+    breakExceptions?: JSON
+
     @Column()
     status?: boolean
 

@@ -20,6 +20,7 @@ import * as bcrypt from "bcrypt"
 import { Category } from "../category/entities/category.entity"
 import { User } from "../user/entities/user.entity"
 import { toUf } from "../helpers/uf-normalizer"
+import { DateTime } from "luxon"
 import {
     DEFAULT_HOME_SERVICE_RADIUS_KM,
     ESTABLISHMENT_RADIUS_KM,
@@ -37,6 +38,7 @@ export interface NearbyRequest {
     longitude?: number
     userId?: number
     role?: string
+    optionwork?: boolean
 }
 
 export interface NearbyResult {
@@ -64,7 +66,13 @@ export class EntrepreneurService {
                 : null
 
         const clientUf = await this.resolveClientUf(request.userId, request.role)
-        const entrepreneurs = await this.findAll(request.query, request.section)
+        const entrepreneurs = (
+            await this.findAll(request.query, request.section)
+        ).filter((e) =>
+            request.optionwork === undefined
+                ? true
+                : e.optionwork === request.optionwork
+        )
 
         if (!geoEnabled) {
             return {
@@ -412,6 +420,254 @@ export class EntrepreneurService {
         })
     }
 
+    /**
+     * Recusa pausas inválidas: início >= fim, fora do expediente do dia, ou
+     * sobrepostas com outra pausa do mesmo dia. `operation` ausente ou dia sem
+     * `breaks` são ignorados — nada para validar.
+     */
+    private validateOperationBreaks(operation: unknown): void {
+        if (operation == null) {
+            return
+        }
+
+        let days: any[]
+        try {
+            days = Array.isArray(operation)
+                ? (operation as any[])
+                : JSON.parse(operation as unknown as string)
+        } catch {
+            throw new HttpException(
+                {
+                    status: HttpStatus.BAD_REQUEST,
+                    error: "Horário de funcionamento em formato inválido"
+                },
+                HttpStatus.BAD_REQUEST
+            )
+        }
+
+        const toMinutes = (raw: string): number => {
+            const [h, m] = raw.padStart(5, "0").split(":").map(Number)
+            return h * 60 + m
+        }
+
+        for (const day of days ?? []) {
+            const breaks = day?.breaks
+            if (!breaks || breaks.length === 0) {
+                continue
+            }
+
+            const openingMinutes = toMinutes(day.openinHours)
+            const closingMinutes = toMinutes(day.closingTime)
+            const sorted = [...breaks].sort(
+                (a, b) => toMinutes(a.start) - toMinutes(b.start)
+            )
+
+            sorted.forEach((brk, i) => {
+                const start = toMinutes(brk.start)
+                const end = toMinutes(brk.end)
+
+                if (start >= end) {
+                    throw new HttpException(
+                        {
+                            status: HttpStatus.BAD_REQUEST,
+                            error: `Pausa de "${day.day}" tem horário de início maior ou igual ao de fim`
+                        },
+                        HttpStatus.BAD_REQUEST
+                    )
+                }
+
+                if (start < openingMinutes || end > closingMinutes) {
+                    throw new HttpException(
+                        {
+                            status: HttpStatus.BAD_REQUEST,
+                            error: `Pausa de "${day.day}" precisa estar dentro do horário de funcionamento`
+                        },
+                        HttpStatus.BAD_REQUEST
+                    )
+                }
+
+                if (i > 0 && start < toMinutes(sorted[i - 1].end)) {
+                    throw new HttpException(
+                        {
+                            status: HttpStatus.BAD_REQUEST,
+                            error: `Pausas de "${day.day}" não podem se sobrepor`
+                        },
+                        HttpStatus.BAD_REQUEST
+                    )
+                }
+            })
+        }
+    }
+
+    /**
+     * Recusa pausas avulsas inválidas: data inválida, início >= fim, sobrepostas entre si
+     * na mesma data, ou fora do expediente do dia da semana correspondente (quando esse dia
+     * está configurado em `operation` — se não estiver, essa checagem específica é pulada).
+     * `breakExceptions` ausente/nulo é ignorado — nada para validar.
+     */
+    private validateBreakExceptions(breakExceptions: unknown, operation: unknown): void {
+        if (breakExceptions == null) {
+            return
+        }
+
+        let exceptions: any[]
+        try {
+            exceptions = Array.isArray(breakExceptions)
+                ? (breakExceptions as any[])
+                : JSON.parse(breakExceptions as unknown as string)
+        } catch {
+            throw new HttpException(
+                {
+                    status: HttpStatus.BAD_REQUEST,
+                    error: "Pausas avulsas em formato inválido"
+                },
+                HttpStatus.BAD_REQUEST
+            )
+        }
+
+        let days: any[] = []
+        if (operation != null) {
+            try {
+                days = Array.isArray(operation)
+                    ? (operation as any[])
+                    : JSON.parse(operation as unknown as string)
+            } catch {
+                days = []
+            }
+        }
+
+        const toMinutes = (raw: string): number => {
+            const [h, m] = raw.padStart(5, "0").split(":").map(Number)
+            return h * 60 + m
+        }
+
+        const byDate = new Map<string, any[]>()
+        for (const exception of exceptions ?? []) {
+            const list = byDate.get(exception?.date) ?? []
+            list.push(exception)
+            byDate.set(exception?.date, list)
+        }
+
+        for (const [date, sameDate] of byDate) {
+            const dateObj = DateTime.fromISO(date, { zone: "America/Sao_Paulo" })
+            if (!dateObj.isValid) {
+                throw new HttpException(
+                    {
+                        status: HttpStatus.BAD_REQUEST,
+                        error: `Data "${date}" inválida numa pausa avulsa`
+                    },
+                    HttpStatus.BAD_REQUEST
+                )
+            }
+
+            const dayOfWeek = dateObj
+                .toFormat("cccc", { locale: "pt-BR" })
+                .trim()
+                .toLowerCase()
+            const weekday = days.find(
+                (d) =>
+                    typeof d?.day === "string" &&
+                    d.day.trim().toLowerCase() === dayOfWeek
+            )
+
+            const sorted = [...sameDate].sort(
+                (a, b) => toMinutes(a.start) - toMinutes(b.start)
+            )
+
+            sorted.forEach((exception, i) => {
+                const start = toMinutes(exception.start)
+                const end = toMinutes(exception.end)
+
+                if (start >= end) {
+                    throw new HttpException(
+                        {
+                            status: HttpStatus.BAD_REQUEST,
+                            error: `Pausa avulsa de "${date}" tem horário de início maior ou igual ao de fim`
+                        },
+                        HttpStatus.BAD_REQUEST
+                    )
+                }
+
+                if (weekday) {
+                    const openingMinutes = toMinutes(weekday.openinHours)
+                    const closingMinutes = toMinutes(weekday.closingTime)
+                    if (start < openingMinutes || end > closingMinutes) {
+                        throw new HttpException(
+                            {
+                                status: HttpStatus.BAD_REQUEST,
+                                error: `Pausa avulsa de "${date}" precisa estar dentro do horário de funcionamento`
+                            },
+                            HttpStatus.BAD_REQUEST
+                        )
+                    }
+                }
+
+                if (i > 0 && start < toMinutes(sorted[i - 1].end)) {
+                    throw new HttpException(
+                        {
+                            status: HttpStatus.BAD_REQUEST,
+                            error: `Pausas avulsas de "${date}" não podem se sobrepor`
+                        },
+                        HttpStatus.BAD_REQUEST
+                    )
+                }
+            })
+        }
+    }
+
+    /**
+     * Um app desatualizado envia o dia sem a chave `breaks` (o campo nem existia na
+     * versão dele). Sem isso, o `PUT` de expediente apaga silenciosamente as pausas já
+     * cadastradas pelo empreendedor. Dia que TRAZ `breaks` (mesmo `[]`) é respeitado —
+     * só a ausência da chave preserva o valor antigo.
+     */
+    private mergeOperationBreaks(
+        existingOperation: unknown,
+        incomingOperation: unknown
+    ): unknown {
+        if (incomingOperation == null) {
+            return incomingOperation
+        }
+
+        const incomingWasString = !Array.isArray(incomingOperation)
+        let incomingDays: any[]
+        try {
+            incomingDays = incomingWasString
+                ? JSON.parse(incomingOperation as unknown as string)
+                : (incomingOperation as any[])
+        } catch {
+            return incomingOperation
+        }
+
+        let existingDays: any[]
+        try {
+            existingDays = Array.isArray(existingOperation)
+                ? (existingOperation as any[])
+                : existingOperation
+                    ? JSON.parse(existingOperation as unknown as string)
+                    : []
+        } catch {
+            existingDays = []
+        }
+
+        const merged = incomingDays.map((day) => {
+            if (day && typeof day === "object" && !("breaks" in day)) {
+                const match = existingDays.find(
+                    (d) =>
+                        typeof d?.day === "string" &&
+                        d.day.trim().toLowerCase() ===
+                            String(day.day).trim().toLowerCase()
+                )
+                if (match?.breaks) {
+                    return { ...day, breaks: match.breaks }
+                }
+            }
+            return day
+        })
+
+        return incomingWasString ? JSON.stringify(merged) : merged
+    }
+
     async updateUser(
         entrepreneurId: number,
         updateUserDto: Entrepreneur
@@ -426,6 +682,7 @@ export class EntrepreneurService {
                 HttpStatus.BAD_REQUEST
             )
         }
+        this.validateOperationBreaks(updateUserDto.operation)
         entrepreneur.name = updateUserDto.name
         entrepreneur.email = updateUserDto.email
         entrepreneur.password = updateUserDto.password
@@ -440,7 +697,20 @@ export class EntrepreneurService {
         entrepreneur.state = updateUserDto.state
         entrepreneur.deslocation = updateUserDto.deslocation
         entrepreneur.valueDeslocation = updateUserDto.valueDeslocation
-        entrepreneur.operation = updateUserDto.operation
+        entrepreneur.operation = this.mergeOperationBreaks(
+            entrepreneur.operation,
+            updateUserDto.operation
+        ) as JSON
+        // Só toca em breakExceptions quando a chave vem no payload: um app antigo que
+        // nunca a envia deixa `updateUserDto.breakExceptions` undefined, e a entidade já
+        // carregada do banco (getUserById) mantém o valor existente sem precisar de merge.
+        if (updateUserDto.breakExceptions !== undefined) {
+            this.validateBreakExceptions(
+                updateUserDto.breakExceptions,
+                updateUserDto.operation
+            )
+            entrepreneur.breakExceptions = updateUserDto.breakExceptions
+        }
         entrepreneur.work = updateUserDto.work
         entrepreneur.description = updateUserDto.description
         return this.entrepreneurRepository.save(entrepreneur)
@@ -463,6 +733,7 @@ export class EntrepreneurService {
                 'document', e.doc,
                 'phone', e.phone,
                 'operation', e.operation,
+                'breakExceptions', e.breakExceptions,
                 'companyName', e.companyName,
                 'address', e.address,
                 'description', e.description,
